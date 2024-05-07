@@ -1,0 +1,230 @@
+import tweepy  # tweepyライブラリをインポート（Twitter APIへのアクセスを提供）
+from tweepy import TweepyException  # tweepyから例外クラスをインポート
+import csv  # CSVファイル操作のためのライブラリをインポート
+import os  # OSレベルの機能、ファイルパス操作などを行うライブラリをインポート
+import time  # 時間に関連する機能を提供するライブラリをインポート
+import datetime  # 日付と時間を操作するためのライブラリをインポート
+import threading  # スレッドを使って並列処理を行うためのライブラリをインポート
+import tkinter as tk  # GUIアプリケーションを作成するためのtkinterライブラリをインポート
+from tkinter import ttk  # ttkモジュールをインポートし、スタイル付きウィジェットを使用
+import queue  # スレッド間でのデータ交換を行うためのキューライブラリをインポート
+
+from datetime import timedelta  # timedeltaオブジェクトを直接利用するためのインポート
+
+# 認証情報を読み込む
+with open('auth_info.txt') as f:
+    consumer_key = f.readline().strip()  # 1行目を読み込み、空白を削除してconsumer_keyに格納
+    consumer_secret = f.readline().strip()  # 2行目を読み込み、同様に処理
+    access_token = f.readline().strip()  # 3行目を読み込み、同様に処理
+    access_token_secret = f.readline().strip()  # 4行目を読み込み、同様に処理
+
+# Tweepyを用いてTwitter APIの認証を設定
+auth = tweepy.OAuthHandler(consumer_key, consumer_secret)  # OAuth認証オブジェクトの作成
+auth.set_access_token(access_token, access_token_secret)  # アクセストークンを設定
+api = tweepy.API(auth, wait_on_rate_limit=True)  # APIオブジェクトを作成し、レートリミットに達した場合は自動的に待機
+
+already_written = set()  # 処理済みのURLを格納するための集合を初期化
+if os.path.isfile('already_written.csv'):  # already_written.csvファイルが存在するかチェック
+    with open('already_written.csv', 'r') as f:  # ファイルを読み込みモードで開く
+        reader = csv.reader(f)  # CSVリーダーオブジェクトを作成
+        for row in reader:  # ファイル内の各行に対してループ
+            if len(row) == 2:  # 行の要素が2つの場合（エラー処理などが含まれていない）
+                already_written.add(row[1])  # URL部分を集合に追加
+
+update_queue = queue.Queue()  # GUIのアップデート用キューを作成
+
+# ステータスメッセージを更新する関数
+def update_status(status):
+    print(status)  # コンソールにステータスを出力
+    update_queue.put(('status', status))  # キューにステータスメッセージを追加
+
+# 経過時間を更新する関数
+def update_elapsed_time(time_str):
+    update_queue.put(('elapsed_time', time_str))  # キューに経過時間メッセージを追加
+
+# エラーメッセージを更新する関数
+def update_error_message(error_str):
+    update_queue.put(('error_message', error_str))  # キューにエラーメッセージを追加
+
+stop_flag = False  # 処理を停止するためのフラグ
+
+# 経過時間をアップデートするスレッド関数
+def elapsed_time_updater(start_time):
+    while not stop_flag:  # stop_flagがTrueになるまでループ
+        elapsed_time = time.time() - start_time  # 経過時間を計算
+        formatted_elapsed_time = str(timedelta(seconds=int(elapsed_time)))  # 経過時間を時分秒形式にフォーマット
+        update_elapsed_time(f'経過時間: {formatted_elapsed_time}')  # 経過時間をアップデート
+        time.sleep(1)  # 1秒待つ
+
+# 特定のユーザーIDのフォロワー情報を取得する関数
+def get_accounts(user_id, update_progress):
+    global stop_flag
+    processed_followers = 0  # 処理済みのフォロワー数を初期化
+    update_status("フォロワーを取得しています...")  # ステータスメッセージを更新
+    try:
+        user = api.get_user(user_id=user_id)  # ユーザー情報を取得
+        follower_ids = list(tweepy.Cursor(api.get_follower_ids, user_id=user_id).items())  # フォロワーのIDリストを取得
+        total_followers = len(follower_ids)  # フォロワーの総数を取得
+
+        for follower_id in follower_ids:  # フォロワーIDごとにループ
+            if stop_flag:  # 停止フラグが立っていたらループを抜ける
+                break
+
+            try:
+                follower = api.get_user(user_id=follower_id)  # フォロワーのユーザー情報を取得
+            except tweepy.errors.TweepyException as e:
+                update_status(f'エラーが発生しました: {e}')  # エラーメッセージを更新
+                continue
+          
+            url = f'https://twitter.com/{follower.screen_name}'  # フォロワーのURLを作成
+            if url in already_written:  # 既に処理済みの場合
+                processed_followers += 1  # 処理済みカウントを増やす
+                update_status(f"{processed_followers}/{total_followers}のフォロワーを処理中...")  # ステータスメッセージを更新
+                update_progress(processed_followers / total_followers * 100)  # 進行状況を更新
+                continue    
+
+            # 条件に一致する場合（フォロワー数とフォロー中の数が500以下、アカウント作成日が2022年10月1日以降）
+            if follower.followers_count <= 500 and follower.friends_count <= 500 and follower.created_at.date() >= datetime.date(2022, 10, 1):
+                with open('result.csv', 'a', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([user_id, url])  # 結果をCSVファイルに書き込む
+            else:
+                with open('unmatched.csv', 'a', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([user_id, url])  # 条件に一致しないデータを別のCSVに保存
+
+            with open('already_written.csv', 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([user_id, url])  # 処理済みURLを保存
+
+            processed_followers += 1  # 処理済みカウントを増やす
+            update_progress(processed_followers / total_followers * 100)  # 進行状況を更新
+
+    except TweepyException as e:
+        if 'Rate limit exceeded' in str(e):
+            rate_limit_countdown(e.retry_after)  # レートリミット超過時のカウントダウン処理を呼び出す
+        else:
+            update_error_message(f'エラーが発生しました: {e}')  # エラーメッセージを更新
+
+# レートリミットが超過された時のカウントダウンを行う関数
+def rate_limit_countdown(retry_after):
+    global stop_flag
+    remaining_seconds = retry_after  # 待機する秒数を設定
+    start_time = time.time()  # 開始時刻を記録
+    while remaining_seconds > 0:  # 残り秒数が0になるまでループ
+        if stop_flag:  # 停止フラグが立っていたらループを抜ける
+            break
+
+        elapsed_time = time.time() - start_time  # 経過時間を計算
+        formatted_elapsed_time = str(timedelta(seconds=int(elapsed_time)))  # 経過時間をフォーマット
+        update_status(f'レート制限に達しました。あと{remaining_seconds}秒待機しています...')  # ステータスメッセージを更新
+        update_elapsed_time(f'経過時間: {formatted_elapsed_time}')  # 経過時間を更新
+        time.sleep(1)  # 1秒待つ
+        remaining_seconds -= 1  # 残り秒数を1減らす
+
+# スクリーンネームからユーザーIDを取得する関数
+def get_user_id_from_screen_name(screen_name):
+    try:
+        user = api.get_user(screen_name=screen_name)  # スクリーンネームからユーザー情報を取得
+        return user.id  # ユーザーIDを返す
+    except TweepyException as e:
+        if 50 in e.api_codes:
+            print('User not found.')  # ユーザーが見つからない場合の処理
+            return None
+        else:
+            print(f'Error occurred: {e}')  # その他のエラーが発生した場合の処理
+            return None
+
+# 特定のスクリーンネームのフォロワー情報を取得するためのメイン関数
+def scrape(screen_name, update_progress):
+    global stop_flag
+    stop_flag = False  # 停止フラグを初期化
+    start_time = time.time()  # 開始時刻を記録
+    elapsed_thread = threading.Thread(target=elapsed_time_updater, args=(start_time,))  # 経過時間更新用のスレッドを開始
+    elapsed_thread.start()  # スレッドを実行
+    
+    user_id = get_user_id_from_screen_name(screen_name)  # スクリーンネームからユーザーIDを取得
+    if user_id is None:
+        print('ユーザーが見つかりませんでした。')  # ユーザーが見つからない場合のメッセージ
+        update_status('ユーザーが見つかりませんでした。')
+        return
+
+    get_accounts(user_id, update_progress)  # フォロワー情報の取得処理を呼び出す
+    stop_flag = True  # 処理完了後、停止フラグを立てる
+
+# 検索ボタンクリック時のイベントハンドラ
+def on_search_click():
+    global stop_flag
+    screen_name = entry.get()  # ユーザー入力のスクリーンネームを取得
+    progress.set(0)  # 進捗バーを0にリセット
+    status_message.set('')  # ステータスメッセージをリセット
+    elapsed_time.set('')  # 経過時間表示をリセット
+    error_message.set('')  # エラーメッセージをリセット
+    stop_flag = False  # 停止フラグをリセット
+    search_thread = threading.Thread(target=scrape, args=(screen_name, lambda p: progress.set(p)))  # スクレイプ処理を行うスレッドを開始
+    search_thread.start()  # スレッドを実行
+
+# 終了ボタンクリック時のイベントハンドラ
+def on_stop_click():
+    global stop_flag
+    stop_flag = True  # 停止フラグを立てる
+    root.destroy()  # GUIを閉じる
+
+# GUIを定期的に更新する関数
+def update_gui():
+    while not update_queue.empty():  # キューが空でない間ループ
+        msg_type, msg = update_queue.get()  # キューからメッセージを取得
+        if msg_type == 'status':
+            status_message.set(msg)  # ステータスメッセージを設定
+        elif msg_type == 'elapsed_time':
+            elapsed_time.set(msg)  # 経過時間を設定
+        elif msg_type == 'error_message':
+            error_message.set(msg)  # エラーメッセージを設定
+    root.after(100, update_gui)  # 100ミリ秒後に再度この関数を呼び出す
+
+# GUIの初期設定
+root = tk.Tk()  # Tkインスタンスを作成
+root.title('Twitter Account Finder')  # ウィンドウのタイトルを設定
+
+frame = ttk.Frame(root, padding=10)  # フレームを作成
+frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N,tk.S))  # グリッドに配置
+
+entry_label = ttk.Label(frame, text='スクリーンネーム (＠を含めず): ')  # エントリーラベルを作成
+entry_label.grid(row=0, column=0)  # グリッドに配置
+
+entry = ttk.Entry(frame)  # エントリーボックスを作成
+entry.grid(row=0, column=1)  # グリッドに配置
+
+search_button = ttk.Button(frame, text='検索', command=on_search_click)  # 検索ボタンを作成
+search_button.grid(row=0, column=2)  # グリッドに配置
+
+stop_button = ttk.Button(frame, text='終了', command=on_stop_click)  # 終了ボタンを作成
+stop_button.grid(row=0, column=3)  # グリッドに配置
+
+progress = tk.DoubleVar()  # 進行状況を格納する変数
+progress_bar = ttk.Progressbar(frame, length=200, mode='determinate', variable=progress)  # 進捗バーを作成
+progress_bar.grid(row=1, column=0, columnspan=4)  # グリッドに配置
+
+status_label = ttk.Label(frame, text='状況:')  # 状況ラベルを作成
+status_label.grid(row=2, column=0, sticky=tk.W)  # グリッドに配置
+
+status_message = tk.StringVar()  # ステータスメッセージ用の変数
+status = ttk.Label(frame, textvariable=status_message)  # ステータス表示用のラベルを作成
+status.grid(row=2, column=1, columnspan=3, sticky=tk.W)  # グリッドに配置
+
+elapsed_label = ttk.Label(frame, text='経過時間:')  # 経過時間ラベルを作成
+elapsed_label.grid(row=3, column=0, sticky=tk.W)  # グリッドに配置
+
+elapsed_time = tk.StringVar()  # 経過時間用の変数
+elapsed = ttk.Label(frame, textvariable=elapsed_time)  # 経過時間表示用のラベルを作成
+elapsed.grid(row=3, column=1, sticky=tk.W)  # グリッドに配置
+
+error_label = ttk.Label(frame, text='エラー:')  # エラーラベルを作成
+error_label.grid(row=4, column=0, sticky=tk.W)  # グリッドに配置
+
+error_message = tk.StringVar()  # エラーメッセージ用の変数
+error = ttk.Label(frame, textvariable=error_message)  # エラー表示用のラベルを作成
+error.grid(row=4, column=1, sticky=tk.W)  # グリッドに配置
+
+root.after(100, update_gui)  # 100ミリ秒後にGUI更新関数を呼び出し
+root.mainloop()  # イベントループを開始
